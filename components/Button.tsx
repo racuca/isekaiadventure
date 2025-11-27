@@ -1,4 +1,6 @@
+
 import React from 'react';
+import { playSelectSound } from '../services/soundService';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'danger' | 'secondary' | 'outline';
@@ -10,6 +12,7 @@ export const Button: React.FC<ButtonProps> = ({
   variant = 'primary', 
   size = 'md',
   className = '',
+  onClick,
   ...props 
 }) => {
   const baseStyles = "font-bold rounded shadow-lg transition-transform active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed";
@@ -27,9 +30,15 @@ export const Button: React.FC<ButtonProps> = ({
     lg: "px-8 py-3 text-lg"
   };
 
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+      playSelectSound();
+      onClick?.(e);
+  };
+
   return (
     <button 
       className={`${baseStyles} ${variants[variant]} ${sizes[size]} ${className}`}
+      onClick={handleClick}
       {...props}
     >
       {children}
