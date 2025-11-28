@@ -1,19 +1,26 @@
+
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GamePhase, Player, Enemy, LogEntry, TileType, Position, MapEntity, Quest } from './types';
 import { generateStoryIntro, generateMonster, generateEndingStory, getMonsterEmoji } from './services/geminiService';
-import { playMoveSound, playBumpSound, playAttackSound, playDamageSound, playHealSound, playGoldSound, playLevelUpSound, playStartSound, playRunSound, playSelectSound } from './services/soundService';
+import { playBumpSound, playAttackSound, playDamageSound, playHealSound, playGoldSound, playLevelUpSound, playStartSound, playRunSound, playSelectSound, playMoveSound } from './services/soundService';
 import { Button } from './components/Button';
 import { ProgressBar } from './components/ProgressBar';
 
 // --- Map Configuration ---
 const MAP_WIDTH = 60;
 const MAP_HEIGHT = 40;
-const VIEWPORT_WIDTH = 13;
-const VIEWPORT_HEIGHT = 9;
+const VIEWPORT_WIDTH = 15; // Slightly larger for smooth scrolling buffer
+const VIEWPORT_HEIGHT = 11;
+const TILE_SIZE = 64; // Pixels per tile
+const PLAYER_SPEED = 8.0; // Tiles per second (Increased for better feel)
+const PLAYER_SIZE = 0.6; // Player collision box size relative to tile (0 to 1)
 
 // --- Town Configuration ---
 const TOWN_WIDTH = 15;
 const TOWN_HEIGHT = 11;
+
+// Background Image for Town (High angle medieval town square)
+const TOWN_BG_URL = "https://images.unsplash.com/photo-1598556816742-0d12e69312ee?q=80&w=2500&auto=format&fit=crop";
 
 type Language = 'en' | 'ko';
 
@@ -77,7 +84,9 @@ const TRANSLATIONS = {
     shopWelcome: "Welcome! What do you need?",
     guildWelcome: "Looking for work, adventurer?",
     itemPotion: "Health Potion (50G)",
-    itemSword: "Sharpen Sword (+2 Atk) (100G)",
+    itemSword: "Iron Sword (+2 Atk) (100G)",
+    itemSteelSword: "Steel Sword (+4 Atk) (250G)",
+    itemArmor: "Sturdy Armor (+30 MaxHP) (200G)",
     monsterNames: {
         slime: "Slime",
         goblin: "Goblin",
@@ -87,8 +96,8 @@ const TRANSLATIONS = {
         boss: "Demon King"
     },
     actionAttack: "Attack (A)",
-    msgNoEnemy: "There is nothing to attack here.",
-    msgEnemyNear: "An enemy is nearby! Press 'A' to fight.",
+    msgNoEnemy: "There is nothing nearby to attack.",
+    msgEnemyNear: "Press 'A' to fight!",
     saveAndLogout: "Save & Logout",
     msgSaved: "Game saved. Logging out...",
     msgLoadFail: "Incorrect Password!",
@@ -144,7 +153,9 @@ const TRANSLATIONS = {
     shopWelcome: "어서오게! 무엇이 필요한가?",
     guildWelcome: "일거리를 찾고 있나?",
     itemPotion: "회복 포션 (50G)",
-    itemSword: "무기 강화 (+2 공격력) (100G)",
+    itemSword: "철검 (+2 공격력) (100G)",
+    itemSteelSword: "강철검 (+4 공격력) (250G)",
+    itemArmor: "튼튼한 갑옷 (+30 최대체력) (200G)",
     monsterNames: {
         slime: "슬라임",
         goblin: "고블린",
@@ -154,8 +165,8 @@ const TRANSLATIONS = {
         boss: "마왕"
     },
     actionAttack: "공격 (A)",
-    msgNoEnemy: "공격할 대상이 없습니다.",
-    msgEnemyNear: "적과 마주쳤습니다! 'A'키를 눌러 전투하세요.",
+    msgNoEnemy: "주변에 공격할 대상이 없습니다.",
+    msgEnemyNear: "'A'키를 눌러 전투하세요!",
     saveAndLogout: "저장 & 종료",
     msgSaved: "저장되었습니다. 로그아웃 중...",
     msgLoadFail: "비밀번호가 틀렸습니다!",
@@ -290,11 +301,47 @@ const generateTownMap = (): TileType[][] => {
     map[2][TOWN_WIDTH-4] = TileType.GUILD;
 
     // Fountain Center
-    map[5][7] = TileType.FOUNTAIN;
+    const fX = 7; 
+    const fY = 5;
+    map[fY][fX] = TileType.FOUNTAIN;
 
     // Exit Bottom
-    map[TOWN_HEIGHT-1][7] = TileType.TOWN_EXIT;
-    
+    const eX = 7;
+    const eY = TOWN_HEIGHT-1;
+    map[eY][eX] = TileType.TOWN_EXIT;
+
+    // --- Paved Roads (Paths) ---
+    // From Exit (7, 10) up to Fountain (7, 5)
+    for(let y=eY-1; y>fY; y--) {
+        map[y][eX] = TileType.DIRT_PATH;
+    }
+    // Around Fountain
+    map[fY][fX-1] = TileType.DIRT_PATH;
+    map[fY][fX+1] = TileType.DIRT_PATH;
+    map[fY-1][fX] = TileType.DIRT_PATH;
+    map[fY+1][fX] = TileType.DIRT_PATH;
+
+    // Path to Shop (from Fountain left)
+    // Fountain is (7,5), Shop entry is near (3,2)
+    // Go left
+    for(let x=fX-1; x>=3; x--) {
+        map[fY][x] = TileType.DIRT_PATH;
+    }
+    // Go up to Shop
+    for(let y=fY-1; y>=3; y--) {
+        map[y][3] = TileType.DIRT_PATH;
+    }
+
+    // Path to Guild (from Fountain right)
+    // Fountain (7,5) -> Guild (11, 2)
+    for(let x=fX+1; x<=11; x++) {
+        map[fY][x] = TileType.DIRT_PATH;
+    }
+    // Go up to Guild
+    for(let y=fY-1; y>=3; y--) {
+        map[y][11] = TileType.DIRT_PATH;
+    }
+
     return map;
 };
 
@@ -307,7 +354,7 @@ const spawnEnemies = (map: TileType[][], lang: Language): MapEntity[] => {
     const addEntity = (x: number, y: number, type: MapEntity['type'], name: string, zone: string, isBoss: boolean = false) => {
         entities.push({
             id: `enemy-${idCounter++}`,
-            position: { x, y },
+            position: { x: x + 0.5, y: y + 0.5 }, // Center of tile
             type,
             name,
             emoji: getMonsterEmoji(name, isBoss),
@@ -360,7 +407,7 @@ const INITIAL_PLAYER: Player = {
   maxExp: 100,
   gold: 10, 
   potions: 0,
-  position: { x: 3, y: 4 }, // Start near town
+  position: { x: 3.5, y: 4.5 }, // Center of tile
   activeQuest: null
 };
 
@@ -378,21 +425,50 @@ const App: React.FC = () => {
   const mapRef = useRef<TileType[][]>(generateMap());
   const townMapRef = useRef<TileType[][]>(generateTownMap());
   const [mapEntities, setMapEntities] = useState<MapEntity[]>([]);
-  const lastProcessedPos = useRef<Position>(INITIAL_PLAYER.position);
+  
+  // Free movement & Loop State
+  const keysPressed = useRef<{ [key: string]: boolean }>({});
+  const lastTimeRef = useRef<number>(0);
+  const requestRef = useRef<number>(0);
+  const lastProcessedPos = useRef<Position>({ x: 3, y: 4 });
+  const [isMoving, setIsMoving] = useState(false);
+  
+  // Ref for Player State (For Game Loop to avoid stale closures)
+  const playerRef = useRef<Player>(INITIAL_PLAYER);
 
   // Town System State
   const [inTown, setInTown] = useState(false);
-  const [worldPos, setWorldPos] = useState<Position>({ x: 3, y: 4 });
+  const [worldPos, setWorldPos] = useState<Position>({ x: 3.5, y: 4.5 });
   const [showShop, setShowShop] = useState(false);
   const [showGuild, setShowGuild] = useState(false);
   const [potentialQuest, setPotentialQuest] = useState<Quest | null>(null);
   const [fledEnemyId, setFledEnemyId] = useState<string | null>(null);
+
+  // Use a Ref for Game State to avoid stale closures in requestAnimationFrame
+  const gameStateRef = useRef({
+      phase: GamePhase.LOGIN,
+      inTown: false,
+      showShop: false,
+      showGuild: false,
+      fledEnemyId: null as string | null
+  });
+
+  // Sync state to ref
+  useEffect(() => {
+      gameStateRef.current = { phase, inTown, showShop, showGuild, fledEnemyId };
+  }, [phase, inTown, showShop, showGuild, fledEnemyId]);
+  
+  // Sync player to ref
+  useEffect(() => {
+      playerRef.current = player;
+  }, [player]);
 
   // Combat Visuals State
   const [combatEffects, setCombatEffects] = useState<CombatEffect[]>([]);
   const [enemyAnim, setEnemyAnim] = useState('');
   const [playerAnim, setPlayerAnim] = useState('');
   const [showSlash, setShowSlash] = useState(false);
+  const [nearbyEnemyId, setNearbyEnemyId] = useState<string | null>(null);
 
   // Login Form State
   const [loginId, setLoginId] = useState('');
@@ -494,193 +570,275 @@ const App: React.FC = () => {
       }
   };
 
-  // --- Interaction Logic ---
+  // --- Interaction Logic (Proximity) ---
   
+  const getClosestEntity = useCallback((playerPos: Position, entities: MapEntity[]) => {
+      let closest: MapEntity | null = null;
+      let minDist = 999;
+
+      entities.forEach(e => {
+          const dx = e.position.x - playerPos.x;
+          const dy = e.position.y - playerPos.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < minDist) {
+              minDist = dist;
+              closest = e;
+          }
+      });
+      return { closest, dist: minDist };
+  }, []);
+
   const checkForInteraction = useCallback(() => {
-      if (inTown) return; // No combat inside town for now
+      const { inTown } = gameStateRef.current;
+      if (inTown) return; 
 
-      const { x, y } = player.position;
-      const neighbors = [
-          { x: x, y: y - 1 }, // Up
-          { x: x, y: y + 1 }, // Down
-          { x: x - 1, y: y }, // Left
-          { x: x + 1, y: y }, // Right
-      ];
-
-      const adjacentEntity = mapEntities.find(e => 
-          neighbors.some(n => n.x === e.position.x && n.y === e.position.y)
-      );
-
-      if (adjacentEntity) {
-          startCombat(adjacentEntity);
+      // Use playerRef to ensure we have latest position without re-binding listeners
+      const { closest, dist } = getClosestEntity(playerRef.current.position, mapEntities);
+      
+      // Distance threshold 1.5 tiles
+      if (closest && dist < 1.5) {
+          startCombat(closest);
       } else {
           addLog(t.msgNoEnemy, 'info');
       }
-  }, [player.position, mapEntities, inTown, t]);
+  }, [mapEntities, t, getClosestEntity]);
 
-  const handleTileClick = (targetX: number, targetY: number) => {
-      if (phase !== GamePhase.MAP) return;
-      playSelectSound();
-      if (inTown) return;
 
-      const { x, y } = player.position;
-      const isAdjacent = Math.abs(targetX - x) + Math.abs(targetY - y) === 1;
+  // --- Game Loop & Physics ---
 
-      if (isAdjacent) {
-          const entity = mapEntities.find(e => e.position.x === targetX && e.position.y === targetY);
-          if (entity) {
-              startCombat(entity);
-          }
-      }
+  const isBlocked = (x: number, y: number, currentMap: TileType[][], isInTown: boolean) => {
+      const tileX = Math.floor(x);
+      const tileY = Math.floor(y);
+      const width = isInTown ? TOWN_WIDTH : MAP_WIDTH;
+      const height = isInTown ? TOWN_HEIGHT : MAP_HEIGHT;
+
+      if (tileX < 0 || tileX >= width || tileY < 0 || tileY >= height) return true;
+      
+      const tile = currentMap[tileY][tileX];
+      const blocked = [TileType.TREE, TileType.MOUNTAIN, TileType.WATER, TileType.TOWN_WALL, TileType.LAVA];
+      // Note: ICE is slippery, handled same as walk for now
+      return blocked.includes(tile);
   };
 
-  // --- Movement & Input Logic ---
+  const gameLoop = (time: number) => {
+      const { phase, inTown, showShop, showGuild, fledEnemyId } = gameStateRef.current;
 
-  const movePlayer = useCallback((dx: number, dy: number) => {
-    if (phase !== GamePhase.MAP) return;
-    if (showShop || showGuild) return; 
-
-    setPlayer(prev => {
-      const newX = prev.position.x + dx;
-      const newY = prev.position.y + dy;
-
-      const currentMap = inTown ? townMapRef.current : mapRef.current;
-      const width = inTown ? TOWN_WIDTH : MAP_WIDTH;
-      const height = inTown ? TOWN_HEIGHT : MAP_HEIGHT;
-
-      // Check bounds
-      if (newX < 0 || newX >= width || newY < 0 || newY >= height) {
-          playBumpSound();
-          return prev;
+      if (phase !== GamePhase.MAP || showShop || showGuild) {
+          requestRef.current = requestAnimationFrame(gameLoop);
+          lastTimeRef.current = time;
+          return;
       }
 
-      // Check Collision
-      const tile = currentMap[newY][newX];
-      const blocked = [TileType.TREE, TileType.MOUNTAIN, TileType.WATER, TileType.TOWN_WALL, TileType.LAVA];
-      // Note: ICE is walkable but slippery? For now just walkable.
-      if (blocked.includes(tile)) {
-        playBumpSound();
-        return prev;
+      const deltaTime = (time - lastTimeRef.current) / 1000;
+      lastTimeRef.current = time;
+
+      // Skip huge jumps (e.g. tab switching)
+      if (deltaTime > 0.1 || deltaTime < 0) {
+          requestRef.current = requestAnimationFrame(gameLoop);
+          return;
       }
-      
-      // Don't walk into monsters
-      if (!inTown) {
-          const blockedByEntity = mapEntities.some(e => e.position.x === newX && e.position.y === newY);
-          if (blockedByEntity) {
-              playBumpSound();
-              return prev;
+
+      // Input Check
+      let dx = 0;
+      let dy = 0;
+      if (keysPressed.current['ArrowUp'] || keysPressed.current['w']) dy -= 1;
+      if (keysPressed.current['ArrowDown'] || keysPressed.current['s']) dy += 1;
+      if (keysPressed.current['ArrowLeft'] || keysPressed.current['a']) dx -= 1;
+      if (keysPressed.current['ArrowRight'] || keysPressed.current['d']) dx += 1;
+
+      // Movement Logic
+      let moving = false;
+      if (dx !== 0 || dy !== 0) {
+          moving = true;
+          // Normalize vector
+          const length = Math.sqrt(dx*dx + dy*dy);
+          dx = (dx / length) * PLAYER_SPEED * deltaTime;
+          dy = (dy / length) * PLAYER_SPEED * deltaTime;
+
+          // Physics on current player ref
+          const prev = playerRef.current;
+          const currentMap = inTown ? townMapRef.current : mapRef.current;
+          let nextX = prev.position.x + dx;
+          let nextY = prev.position.y + dy;
+
+          // Collision Detection (Box Check)
+          const halfSize = PLAYER_SIZE / 2;
+          
+          // Check X axis
+          let hitX = false;
+          if (dx > 0) {
+              if (isBlocked(nextX + halfSize, prev.position.y - halfSize, currentMap, inTown) ||
+                  isBlocked(nextX + halfSize, prev.position.y + halfSize, currentMap, inTown)) hitX = true;
+          } else if (dx < 0) {
+              if (isBlocked(nextX - halfSize, prev.position.y - halfSize, currentMap, inTown) ||
+                  isBlocked(nextX - halfSize, prev.position.y + halfSize, currentMap, inTown)) hitX = true;
+          }
+
+          if (hitX) nextX = prev.position.x; // Cancel X move
+
+          // Check Y axis
+          let hitY = false;
+          if (dy > 0) {
+              if (isBlocked(nextX - halfSize, nextY + halfSize, currentMap, inTown) ||
+                  isBlocked(nextX + halfSize, nextY + halfSize, currentMap, inTown)) hitY = true;
+          } else if (dy < 0) {
+              if (isBlocked(nextX - halfSize, nextY - halfSize, currentMap, inTown) ||
+                  isBlocked(nextX + halfSize, nextY - halfSize, currentMap, inTown)) hitY = true;
+          }
+
+          if (hitY) nextY = prev.position.y; // Cancel Y move
+
+          // Only update state if position changed significantly
+          if (nextX !== prev.position.x || nextY !== prev.position.y) {
+               const newPlayer = { ...prev, position: { x: nextX, y: nextY } };
+               
+               // CRITICAL FIX: Update the ref IMMEDIATELY to prevent next frame from using stale position
+               playerRef.current = newPlayer; 
+               setPlayer(newPlayer);
+               
+               if (fledEnemyId) setFledEnemyId(null);
           }
       }
-
-      // Reset fled status when moving
-      if (fledEnemyId) setFledEnemyId(null);
-
-      playMoveSound();
-
-      // Store previous position for potential retreat
-      const newPlayer = { ...prev, position: { x: newX, y: newY } };
       
-      return newPlayer;
-    });
-  }, [phase, inTown, showShop, showGuild, mapEntities, fledEnemyId]);
+      // Update animation state only if changed
+      setIsMoving(prev => prev !== moving ? moving : prev);
 
-  // Handle tile events (Removed automatic combat trigger)
+      requestRef.current = requestAnimationFrame(gameLoop);
+  };
+
+  // Keyboard Listeners - Run once
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+        if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key)) {
+            e.preventDefault(); // Prevent scrolling
+        }
+        keysPressed.current[e.key] = true;
+
+        if (gameStateRef.current.phase === GamePhase.MAP) {
+            if (e.key === 'a' || e.key === 'A' || e.key === ' ' || e.key === 'Enter') {
+                // Trigger interaction manually
+                checkForInteraction();
+            }
+            if (e.key === 'Escape') {
+                setShowShop(false);
+                setShowGuild(false);
+            }
+        }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+        keysPressed.current[e.key] = false;
+    };
+    
+    // Clear keys on blur to prevent stuck running
+    const handleBlur = () => {
+        keysPressed.current = {};
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+        window.removeEventListener('keydown', handleKeyDown);
+        window.removeEventListener('keyup', handleKeyUp);
+        window.removeEventListener('blur', handleBlur);
+    };
+  }, [checkForInteraction]); // checkForInteraction uses refs now, so it's stable-ish
+
+  // Start/Stop Loop
+  useEffect(() => {
+      requestRef.current = requestAnimationFrame(gameLoop);
+      return () => cancelAnimationFrame(requestRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Run once, loop uses refs
+
+
+  // Handle tile events (Tile center based)
   useEffect(() => {
     if (phase !== GamePhase.MAP) return;
 
-    const { x, y } = player.position;
+    const tileX = Math.floor(player.position.x);
+    const tileY = Math.floor(player.position.y);
     
     // Prevent re-triggering event on the same tile instantly
-    const isNewTile = x !== lastProcessedPos.current.x || y !== lastProcessedPos.current.y;
-    lastProcessedPos.current = { x, y };
+    const isNewTile = tileX !== lastProcessedPos.current.x || tileY !== lastProcessedPos.current.y;
+    if (isNewTile) {
+        lastProcessedPos.current = { x: tileX, y: tileY };
+        // Simple move sound on tile change
+        if (isMoving) playMoveSound();
+    }
 
     // --- TOWN LOGIC ---
     if (inTown) {
-        const tile = townMapRef.current[y][x];
+        const tile = townMapRef.current[tileY]?.[tileX];
         
         // Exit Town
         if (tile === TileType.TOWN_EXIT) {
             setInTown(false);
             setPlayer(prev => ({ ...prev, position: worldPos }));
-            
-            // Fix loop: prevent immediate re-entry by syncing ref to world pos
-            lastProcessedPos.current = worldPos;
-            
+            lastProcessedPos.current = { x: Math.floor(worldPos.x), y: Math.floor(worldPos.y) };
             addLog(t.logLeave, 'info');
             return;
         }
 
         if (tile === TileType.SHOP) {
-            if (isNewTile) setShowShop(true);
+            if (isNewTile) {
+                setShowShop(true);
+                // Push back slightly to avoid re-trigger loop if they cancel
+                setPlayer(p => {
+                    const corrected = {...p, position: {x: p.position.x, y: p.position.y + 1}};
+                    playerRef.current = corrected; // Sync Ref
+                    return corrected;
+                });
+            }
         }
 
         if (tile === TileType.GUILD) {
             if (isNewTile) {
                 generateRandomQuest();
                 setShowGuild(true);
+                setPlayer(p => {
+                    const corrected = {...p, position: {x: p.position.x, y: p.position.y + 1}};
+                    playerRef.current = corrected; // Sync Ref
+                    return corrected;
+                });
             }
         }
         return;
     }
 
     // --- WORLD LOGIC ---
-    const tile = mapRef.current[y][x];
+    const tile = mapRef.current[tileY]?.[tileX];
 
     // Enter Town
-    if (isNewTile && tile === TileType.TOWN) {
-      setWorldPos({ x, y }); 
+    if (tile === TileType.TOWN && isNewTile) {
+      setWorldPos({ x: player.position.x, y: player.position.y }); 
       setInTown(true);
-      setPlayer(prev => ({ ...prev, position: { x: 7, y: 9 } })); 
+      const startPos = { x: 7.5, y: 9.5 };
+      setPlayer(prev => {
+          const p = { ...prev, position: startPos };
+          playerRef.current = p;
+          return p;
+      });
       addLog(t.logTown, 'info');
       return;
     }
 
     // Lava Damage
     if (tile === TileType.LAVA && isNewTile) {
-        // Should not happen as lava is blocked, but if forced:
         setPlayer(prev => ({ ...prev, hp: Math.max(0, prev.hp - 10) }));
         addLog("The lava burns you!", 'danger');
         triggerCombatEffect('damagePlayer', 10);
     }
 
-    // Check for nearby enemies just to show a hint (no combat start)
-    const neighbors = [
-        { x: x, y: y - 1 }, { x: x, y: y + 1 }, { x: x - 1, y }, { x: x + 1, y }
-    ];
-    const nearbyEnemy = mapEntities.find(e => neighbors.some(n => n.x === e.position.x && n.y === e.position.y));
-    if (nearbyEnemy && isNewTile) {
-        addLog(t.msgEnemyNear, 'danger');
+    // Check for nearby enemies just to show a hint
+    const { closest, dist } = getClosestEntity(player.position, mapEntities);
+    if (closest && dist < 1.5) {
+        setNearbyEnemyId(closest.id);
+    } else {
+        setNearbyEnemyId(null);
     }
 
-  }, [player.position, phase, mapEntities, t, inTown, worldPos]);
-
-  // Keyboard Listener
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-        if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight", " "].indexOf(e.key) > -1) {
-            e.preventDefault();
-        }
-
-        if (phase === GamePhase.MAP) {
-            switch (e.key) {
-                case 'ArrowUp': case 'w': movePlayer(0, -1); break;
-                case 'ArrowDown': case 's': movePlayer(0, 1); break;
-                case 'ArrowLeft': movePlayer(-1, 0); break; // Removed 'a' collision
-                case 'ArrowRight': case 'd': movePlayer(1, 0); break;
-                case 'a': case 'A': checkForInteraction(); break; // 'A' for Action/Attack
-                case ' ': case 'Enter': checkForInteraction(); break;
-                
-                case 'Escape': 
-                    setShowShop(false);
-                    setShowGuild(false);
-                    break;
-            }
-        }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [movePlayer, phase, checkForInteraction]);
+  }, [player.position, phase, mapEntities, t, inTown, worldPos, getClosestEntity, isMoving]);
 
 
   // --- Game Actions ---
@@ -691,20 +849,18 @@ const App: React.FC = () => {
     if (!loginId || !loginPw) return;
     setLoading(true);
 
-    // Check for save data
     const savedData = localStorage.getItem(`isekaisave_${loginId}`);
     if (savedData) {
         try {
             const save = JSON.parse(savedData);
             if (save.password === loginPw) {
-                // Load Game
                 setPlayer(save.player);
                 setInTown(save.inTown);
                 setWorldPos(save.worldPos);
                 setMapEntities(save.mapEntities);
                 setLanguage(save.language);
                 mapRef.current = save.mapLayout;
-                lastProcessedPos.current = save.player.position;
+                lastProcessedPos.current = {x: Math.floor(save.player.position.x), y: Math.floor(save.player.position.y)};
                 
                 setPhase(GamePhase.MAP);
                 addLog(t.msgLoaded, 'success');
@@ -720,7 +876,6 @@ const App: React.FC = () => {
         }
     }
 
-    // New Game
     setPlayer(prev => ({ ...prev, name: loginId }));
     try {
       const intro = await generateStoryIntro(loginId, language);
@@ -754,7 +909,12 @@ const App: React.FC = () => {
     playStartSound();
     setPhase(GamePhase.MAP);
     setInTown(true);
-    setPlayer(prev => ({ ...prev, position: { x: 7, y: 5 } })); 
+    const startPos = { x: 7.5, y: 5.5 };
+    setPlayer(prev => {
+        const p = { ...prev, position: startPos };
+        playerRef.current = p; // Sync
+        return p;
+    }); 
     addLog(t.logStart(player.name), 'info');
   };
 
@@ -763,6 +923,10 @@ const App: React.FC = () => {
     playStartSound();
     setLoading(true);
     setPhase(GamePhase.COMBAT);
+    setIsMoving(false);
+    
+    // Cancel any movement keys
+    keysPressed.current = {};
 
     try {
       let level = player.level;
@@ -932,6 +1096,18 @@ const App: React.FC = () => {
         setFledEnemyId(enemy?.id || null);
         setEnemy(null);
         setPhase(GamePhase.MAP);
+        
+        // Push back slightly to avoid instant re-trigger if they hold a key
+        const angle = Math.random() * Math.PI * 2;
+        setPlayer(p => {
+            const newP = {
+              ...p, 
+              position: { x: p.position.x + Math.cos(angle), y: p.position.y + Math.sin(angle) }
+            };
+            playerRef.current = newP;
+            return newP;
+        });
+
     } else {
         addLog(t.logRunFail, 'danger');
         if (enemy) setTimeout(() => enemyTurn(enemy.hp), 500);
@@ -962,15 +1138,17 @@ const App: React.FC = () => {
     const newMap = generateMap();
     mapRef.current = newMap;
     setMapEntities(spawnEnemies(newMap, currentLang));
-    lastProcessedPos.current = { ...INITIAL_PLAYER.position };
+    lastProcessedPos.current = { x: Math.floor(INITIAL_PLAYER.position.x), y: Math.floor(INITIAL_PLAYER.position.y) };
   };
 
   // --- Shop & Guild Logic ---
 
-  const buyItem = (type: 'potion' | 'sword') => {
+  const buyItem = (type: 'potion' | 'sword' | 'steelSword' | 'armor') => {
       let cost = 0;
       if (type === 'potion') cost = 50;
       if (type === 'sword') cost = 100;
+      if (type === 'steelSword') cost = 250;
+      if (type === 'armor') cost = 200;
 
       if (player.gold >= cost) {
           playGoldSound();
@@ -978,7 +1156,9 @@ const App: React.FC = () => {
               ...prev,
               gold: prev.gold - cost,
               potions: type === 'potion' ? prev.potions + 1 : prev.potions,
-              atk: type === 'sword' ? prev.atk + 2 : prev.atk
+              atk: type === 'sword' ? prev.atk + 2 : (type === 'steelSword' ? prev.atk + 4 : prev.atk),
+              maxHp: type === 'armor' ? prev.maxHp + 30 : prev.maxHp,
+              hp: type === 'armor' ? prev.hp + 30 : prev.hp
           }));
           addLog(t.msgBought, 'success');
       } else {
@@ -1020,34 +1200,43 @@ const App: React.FC = () => {
   // --- Rendering ---
 
   const getVisibleMap = () => {
-      if (inTown) {
-           const startX = Math.max(0, Math.min(player.position.x - Math.floor(VIEWPORT_WIDTH / 2), TOWN_WIDTH - VIEWPORT_WIDTH));
-           const startY = Math.max(0, Math.min(player.position.y - Math.floor(VIEWPORT_HEIGHT / 2), TOWN_HEIGHT - VIEWPORT_HEIGHT));
+      const width = inTown ? TOWN_WIDTH : MAP_WIDTH;
+      const height = inTown ? TOWN_HEIGHT : MAP_HEIGHT;
 
-           const rows = [];
-           for(let y=0; y<VIEWPORT_HEIGHT; y++) {
-              const row = [];
-              for(let x=0; x<VIEWPORT_WIDTH; x++) {
-                  row.push(townMapRef.current[startY + y][startX + x]);
-              }
-              rows.push(row);
-           }
-           return { startX, startY, rows };
-      } else {
-          // World Map
-          const startX = Math.max(0, Math.min(player.position.x - Math.floor(VIEWPORT_WIDTH / 2), MAP_WIDTH - VIEWPORT_WIDTH));
-          const startY = Math.max(0, Math.min(player.position.y - Math.floor(VIEWPORT_HEIGHT / 2), MAP_HEIGHT - VIEWPORT_HEIGHT));
+      // Calculate camera position (Top-Left of viewport)
+      // Player is centered. 
+      // CameraX = PlayerX - ViewWidth/2
+      let camX = player.position.x - VIEWPORT_WIDTH / 2;
+      let camY = player.position.y - VIEWPORT_HEIGHT / 2;
 
-          const rows = [];
-          for(let y=0; y<VIEWPORT_HEIGHT; y++) {
-              const row = [];
-              for(let x=0; x<VIEWPORT_WIDTH; x++) {
-                  row.push(mapRef.current[startY + y][startX + x]);
+      // Clamp camera
+      camX = Math.max(0, Math.min(camX, width - VIEWPORT_WIDTH));
+      camY = Math.max(0, Math.min(camY, height - VIEWPORT_HEIGHT));
+
+      // Calculate integers for tile Grid
+      const startTileX = Math.floor(camX);
+      const startTileY = Math.floor(camY);
+
+      // Pixel offset for smooth scrolling
+      const offsetX = (camX - startTileX) * TILE_SIZE;
+      const offsetY = (camY - startTileY) * TILE_SIZE;
+
+      const rows = [];
+      // Render one extra tile row/col for smooth edges
+      for(let y=0; y<=VIEWPORT_HEIGHT; y++) {
+          const row = [];
+          for(let x=0; x<=VIEWPORT_WIDTH; x++) {
+              const tx = startTileX + x;
+              const ty = startTileY + y;
+              if (tx < width && ty < height) {
+                 row.push((inTown ? townMapRef.current : mapRef.current)[ty][tx]);
+              } else {
+                 row.push(TileType.WATER); // Fill with dummy
               }
-              rows.push(row);
           }
-          return { startX, startY, rows };
+          rows.push(row);
       }
+      return { startTileX, startTileY, rows, offsetX, offsetY, camX, camY };
   };
 
   const getPseudoRandom = (x: number, y: number) => {
@@ -1055,20 +1244,16 @@ const App: React.FC = () => {
   };
 
   const getTileRender = (type: TileType, x: number, y: number) => {
-      const isPlayer = player.position.x === x && player.position.y === y;
-      
-      const entity = !inTown ? mapEntities.find(e => e.position.x === x && e.position.y === y) : null;
-
+      // NOTE: Entity and Player rendering is now separate from the grid tile
       let content = '';
       let bgClass = '';
-      let borderColor = '';
+      let borderColor = 'border-transparent'; // Default transparent border to avoid grid look
       let animClass = '';
       const rand = getPseudoRandom(x, y);
 
       switch(type) {
           case TileType.GRASS: 
               bgClass = 'bg-green-600'; 
-              borderColor = 'border-green-700';
               if (rand > 0.85) content = '🌼';
               else if (rand > 0.75) content = '🌱';
               else if (rand > 0.65) content = '🌾';
@@ -1076,33 +1261,28 @@ const App: React.FC = () => {
               break;
           case TileType.FOREST: 
               bgClass = 'bg-emerald-800'; 
-              borderColor = 'border-emerald-900';
               content = '🌲'; 
               if (rand > 0.8) content = '🍄';
               animClass = 'animate-sway';
               break;
           case TileType.TREE: 
               bgClass = 'bg-green-900'; 
-              borderColor = 'border-green-950';
               content = '🌳'; 
               animClass = 'animate-sway';
               break;
           case TileType.SAND: 
               bgClass = 'bg-yellow-600'; 
-              borderColor = 'border-yellow-700';
               if (rand > 0.9) content = '🌵';
               else if (rand > 0.85) content = '🦂';
               else if (rand > 0.8) content = '🦴';
               break;
           case TileType.MOUNTAIN: 
               bgClass = 'bg-slate-600'; 
-              borderColor = 'border-slate-700';
               content = '⛰️'; 
               if (rand > 0.7) content = '🏔️';
               break;
           case TileType.WATER: 
               bgClass = 'bg-blue-500'; 
-              borderColor = 'border-blue-600';
               content = '🌊'; 
               animClass = 'animate-wave';
               break;
@@ -1114,7 +1294,6 @@ const App: React.FC = () => {
               break;
           case TileType.DUNGEON_FLOOR: 
               bgClass = 'bg-slate-800'; 
-              borderColor = 'border-slate-900';
               if (rand > 0.9) content = '💀';
               else if (rand > 0.8) content = '🕸️';
               else if (rand > 0.7) content = '🪨';
@@ -1129,18 +1308,15 @@ const App: React.FC = () => {
           // New Tiles
           case TileType.SNOW:
               bgClass = 'bg-slate-100';
-              borderColor = 'border-slate-300';
               if (rand > 0.8) content = '❄️';
               else if (rand > 0.6) content = '🌲'; // Snowy tree
               break;
           case TileType.ICE:
               bgClass = 'bg-cyan-200';
-              borderColor = 'border-cyan-300';
               content = '🧊';
               break;
           case TileType.LAVA:
               bgClass = 'bg-orange-600';
-              borderColor = 'border-orange-700';
               content = '🌋';
               animClass = 'animate-pulse';
               break;
@@ -1150,42 +1326,49 @@ const App: React.FC = () => {
               content = '🪵';
               break;
           case TileType.DIRT_PATH:
-              bgClass = 'bg-amber-900/40 bg-green-700'; // Blended
-              borderColor = 'border-transparent';
-              if (rand > 0.8) content = '🐾';
+              if (inTown) {
+                  // In Town: Use stone texture overlay
+                  bgClass = 'bg-stone-500/60 backdrop-blur-sm';
+                  borderColor = 'border-stone-400/50';
+              } else {
+                  // In Wild: Dirt path
+                  bgClass = 'bg-amber-900/40 bg-green-700'; 
+                  borderColor = 'border-transparent';
+              }
+              if (rand > 0.8 && !inTown) content = '🐾';
               break;
           
           // Town Tiles
           case TileType.TOWN_FLOOR:
-              bgClass = 'bg-amber-100/10';
-              borderColor = 'border-amber-900/30';
+              bgClass = 'bg-black/10'; // Transparent for BG image
+              borderColor = 'border-transparent';
               break;
           case TileType.TOWN_WALL:
-              bgClass = 'bg-stone-600';
-              borderColor = 'border-stone-700';
+              bgClass = 'bg-stone-900/80';
+              borderColor = 'border-stone-800';
               content = '🧱';
               break;
           case TileType.SHOP:
-              bgClass = 'bg-amber-800';
-              borderColor = 'border-amber-600';
-              content = '🏪';
+              bgClass = 'bg-[#3E2723]'; // Dark Wood
+              borderColor = 'border-[#5D4037]';
+              content = '⛺';
               animClass = 'animate-bounce-subtle';
               break;
           case TileType.GUILD:
-              bgClass = 'bg-blue-900';
-              borderColor = 'border-blue-700';
+              bgClass = 'bg-slate-800';
+              borderColor = 'border-slate-600';
               content = '🛡️';
               animClass = 'animate-bounce-subtle';
               break;
           case TileType.FOUNTAIN:
-              bgClass = 'bg-blue-400';
-              borderColor = 'border-blue-300';
+              bgClass = 'bg-blue-500/80';
+              borderColor = 'border-blue-400';
               content = '⛲';
               animClass = 'animate-pulse-glow';
               break;
           case TileType.TOWN_EXIT:
-              bgClass = 'bg-green-800';
-              borderColor = 'border-green-600';
+              bgClass = 'bg-[#3E2723]';
+              borderColor = 'border-[#5D4037]';
               content = '🚪';
               break;
 
@@ -1195,22 +1378,18 @@ const App: React.FC = () => {
       
       return (
           <div key={`${x}-${y}`} 
-               onClick={() => handleTileClick(x, y)}
-               className={`w-12 h-12 md:w-16 md:h-16 border ${borderColor} flex items-center justify-center text-2xl md:text-3xl relative ${bgClass} shadow-sm cursor-pointer hover:brightness-110 overflow-hidden`}>
+               // Mobile Click-to-move isn't implemented with Free Move easily, so we just check interaction on click
+               onClick={() => {}}
+               className={`w-[64px] h-[64px] border ${borderColor} flex items-center justify-center text-3xl relative ${bgClass} overflow-hidden`}>
               <span className={`opacity-80 select-none absolute pointer-events-none ${animClass}`}>{content}</span>
               
               {/* Particle Effects */}
-              {type === TileType.WATER && (
+              {(type === TileType.WATER || type === TileType.FOUNTAIN) && (
                   <div className="absolute w-1 h-1 bg-white/50 rounded-full animate-sparkle" style={{top: `${rand*100}%`, left: `${(1-rand)*100}%`}}></div>
               )}
               {type === TileType.LAVA && (
                   <div className="absolute w-2 h-2 bg-yellow-400/50 rounded-full animate-ping" style={{top: `${rand*100}%`, left: `${(1-rand)*100}%`}}></div>
               )}
-
-              {entity && (
-                  <span className="z-10 animate-pulse drop-shadow-md select-none pointer-events-none">{entity.emoji}</span>
-              )}
-              {isPlayer && <span className="absolute inset-0 flex items-center justify-center z-20 animate-bounce drop-shadow-lg scale-125 pointer-events-none">🧙‍♂️</span>}
           </div>
       );
   };
@@ -1281,32 +1460,123 @@ const App: React.FC = () => {
   );
 
   const renderViewport = () => {
-      const { startX, startY, rows } = getVisibleMap();
+      const { startTileX, startTileY, rows, offsetX, offsetY, camX, camY } = getVisibleMap();
       
+      const townStyle: React.CSSProperties = inTown ? {
+          backgroundImage: `url('${TOWN_BG_URL}')`,
+          backgroundSize: `${TOWN_WIDTH * TILE_SIZE}px ${TOWN_HEIGHT * TILE_SIZE}px`,
+          // Adjust background position based on camera
+          backgroundPosition: `-${camX * TILE_SIZE}px -${camY * TILE_SIZE}px`,
+          backgroundBlendMode: 'overlay',
+          backgroundColor: 'rgba(0,0,0,0.3)'
+      } : {};
+
       return (
         <div className="flex flex-col items-center justify-center p-2 relative">
-            <div className="bg-slate-950 p-1 rounded-lg border-4 border-slate-600 shadow-2xl">
-                {rows.map((row, relativeY) => (
-                    <div key={relativeY} className="flex">
-                        {row.map((tile, relativeX) => getTileRender(tile, startX + relativeX, startY + relativeY))}
-                    </div>
-                ))}
+            <div className="relative overflow-hidden shadow-2xl rounded-lg border-4 border-slate-600 bg-slate-950"
+                 style={{ 
+                     width: VIEWPORT_WIDTH * TILE_SIZE, 
+                     height: VIEWPORT_HEIGHT * TILE_SIZE,
+                     ...townStyle
+                 }}>
+                
+                {/* Map Layer - Sliding Container */}
+                <div style={{ transform: `translate(-${offsetX}px, -${offsetY}px)` }} className="will-change-transform flex flex-col">
+                    {rows.map((row, relativeY) => (
+                        <div key={relativeY} className="flex">
+                            {row.map((tile, relativeX) => getTileRender(tile, startTileX + relativeX, startTileY + relativeY))}
+                        </div>
+                    ))}
+                </div>
+
+                {/* Entity Layer - Absolute positioning relative to Camera */}
+                {!inTown && mapEntities.map(entity => {
+                    const screenX = (entity.position.x - camX) * TILE_SIZE;
+                    const screenY = (entity.position.y - camY) * TILE_SIZE;
+                    
+                    // Optimization: Don't render if way off screen
+                    if (screenX < -TILE_SIZE || screenX > (VIEWPORT_WIDTH + 1) * TILE_SIZE ||
+                        screenY < -TILE_SIZE || screenY > (VIEWPORT_HEIGHT + 1) * TILE_SIZE) return null;
+
+                    return (
+                        <div key={entity.id} 
+                             className="absolute flex items-center justify-center text-4xl animate-idle drop-shadow-md z-10 transition-transform duration-200"
+                             style={{ 
+                                 width: TILE_SIZE, 
+                                 height: TILE_SIZE,
+                                 left: screenX - TILE_SIZE/2, 
+                                 top: screenY - TILE_SIZE/2,
+                                 transform: nearbyEnemyId === entity.id ? 'scale(1.2)' : 'scale(1)'
+                             }}>
+                            {entity.emoji}
+                            {nearbyEnemyId === entity.id && (
+                                <div className="absolute -top-4 text-xs bg-red-600 text-white px-1 rounded animate-bounce">
+                                    A
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+
+                {/* Player Layer - Relative to Camera */}
+                {/* 
+                   Logic Update: 
+                   If camX/camY is clamped (at edge of map), the player's position on screen needs to change.
+                   ScreenX = (PlayerWorldX - CameraWorldX) * TileSize
+                   Center Tile of Sprite is PlayerWorldX.
+                */}
+                <div className="absolute z-20 flex items-center justify-center drop-shadow-lg pointer-events-none"
+                     style={{
+                         left: (player.position.x - camX) * TILE_SIZE - TILE_SIZE/2,
+                         top: (player.position.y - camY) * TILE_SIZE - TILE_SIZE/2,
+                         width: TILE_SIZE,
+                         height: TILE_SIZE
+                     }}>
+                     <span className={`text-5xl transition-transform ${isMoving ? 'animate-bounce' : 'animate-bounce-subtle'}`}>🧙‍♂️</span>
+                     
+                     {/* Interaction Ring */}
+                     <div className={`absolute inset-0 rounded-full border-2 border-dashed ${nearbyEnemyId || inTown ? 'border-green-400 opacity-50 animate-spin-slow' : 'border-slate-500 opacity-20'}`} 
+                          style={{ width: '120%', height: '120%', left: '-10%', top: '-10%' }}></div>
+                </div>
+
             </div>
             
             <div className="mt-2 text-center text-slate-400 text-sm">
-                {inTown ? "TOWN SQUARE" : `WILDERNESS (${player.position.x}, ${player.position.y})`}
+                {inTown ? "TOWN SQUARE" : `WILDERNESS (${Math.floor(player.position.x)}, ${Math.floor(player.position.y)})`}
             </div>
 
-            {/* Mobile D-Pad */}
+            {/* Mobile Controls */}
             <div className="mt-4 grid grid-cols-3 gap-2 md:hidden">
                  <div />
-                 <Button size="lg" className="h-16 w-16 text-2xl" onClick={() => movePlayer(0, -1)}>⬆️</Button>
+                 <Button className="h-16 w-16 text-2xl" 
+                         onMouseDown={(e) => { e.preventDefault(); keysPressed.current['ArrowUp'] = true; }} 
+                         onMouseUp={(e) => { e.preventDefault(); keysPressed.current['ArrowUp'] = false; }}
+                         onTouchStart={(e) => { e.preventDefault(); keysPressed.current['ArrowUp'] = true; }} 
+                         onTouchEnd={(e) => { e.preventDefault(); keysPressed.current['ArrowUp'] = false; }}
+                 >⬆️</Button>
                  <div />
-                 <Button size="lg" className="h-16 w-16 text-2xl" onClick={() => movePlayer(-1, 0)}>⬅️</Button>
+                 
+                 <Button className="h-16 w-16 text-2xl" 
+                         onMouseDown={(e) => { e.preventDefault(); keysPressed.current['ArrowLeft'] = true; }} 
+                         onMouseUp={(e) => { e.preventDefault(); keysPressed.current['ArrowLeft'] = false; }}
+                         onTouchStart={(e) => { e.preventDefault(); keysPressed.current['ArrowLeft'] = true; }} 
+                         onTouchEnd={(e) => { e.preventDefault(); keysPressed.current['ArrowLeft'] = false; }}
+                 >⬅️</Button>
                  <Button size="lg" className="h-16 w-16 text-xs font-bold bg-red-800 border-red-900" onClick={checkForInteraction}>{t.actionAttack}</Button>
-                 <Button size="lg" className="h-16 w-16 text-2xl" onClick={() => movePlayer(1, 0)}>➡️</Button>
+                 <Button className="h-16 w-16 text-2xl" 
+                         onMouseDown={(e) => { e.preventDefault(); keysPressed.current['ArrowRight'] = true; }} 
+                         onMouseUp={(e) => { e.preventDefault(); keysPressed.current['ArrowRight'] = false; }}
+                         onTouchStart={(e) => { e.preventDefault(); keysPressed.current['ArrowRight'] = true; }} 
+                         onTouchEnd={(e) => { e.preventDefault(); keysPressed.current['ArrowRight'] = false; }}
+                 >➡️</Button>
+                 
                  <div />
-                 <Button size="lg" className="h-16 w-16 text-2xl" onClick={() => movePlayer(0, 1)}>⬇️</Button>
+                 <Button className="h-16 w-16 text-2xl" 
+                         onMouseDown={(e) => { e.preventDefault(); keysPressed.current['ArrowDown'] = true; }} 
+                         onMouseUp={(e) => { e.preventDefault(); keysPressed.current['ArrowDown'] = false; }}
+                         onTouchStart={(e) => { e.preventDefault(); keysPressed.current['ArrowDown'] = true; }} 
+                         onTouchEnd={(e) => { e.preventDefault(); keysPressed.current['ArrowDown'] = false; }}
+                 >⬇️</Button>
                  <div />
             </div>
         </div>
@@ -1329,6 +1599,12 @@ const App: React.FC = () => {
                   </Button>
                   <Button className="w-full flex justify-between" variant="outline" onClick={() => buyItem('sword')}>
                       <span>{t.itemSword}</span>
+                  </Button>
+                  <Button className="w-full flex justify-between" variant="outline" onClick={() => buyItem('steelSword')}>
+                      <span>{t.itemSteelSword}</span>
+                  </Button>
+                  <Button className="w-full flex justify-between" variant="outline" onClick={() => buyItem('armor')}>
+                      <span>{t.itemArmor}</span>
                   </Button>
               </div>
           </div>
@@ -1404,7 +1680,9 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      <div className="h-40 bg-black/60 overflow-y-auto p-4 border-t border-slate-700">
+      <div className="h-40 bg-black/60 overflow-y-auto p-4 border-t border-slate-700 pointer-events-none">
+         {/* Pointer events none to scroll through? No, need scroll. But mobile buttons overlap. */}
+         {/* Actually logs are fine */}
          {logs.slice(-5).map(log => (
              <div key={log.id} className={`text-sm mb-1 ${log.type === 'danger' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : log.type === 'quest' ? 'text-blue-400 font-bold' : 'text-slate-300'}`}>
                  {log.text}
@@ -1466,10 +1744,13 @@ const App: React.FC = () => {
                     </div>
                     
                     <div className="flex gap-4 items-center font-mono font-bold">
-                        <div className="flex items-center text-red-400">
+                        <div className="flex items-center text-red-400" title="Health">
                              ❤️ {player.hp}
                         </div>
-                        <div className="flex items-center text-amber-400">
+                        <div className="flex items-center text-slate-300" title="Attack Power">
+                             ⚔️ {player.atk}
+                        </div>
+                        <div className="flex items-center text-amber-400" title="Gold">
                              💰 {player.gold}
                         </div>
                         <Button variant="outline" size="sm" onClick={handleSaveAndLogout} className="text-xs ml-2">
